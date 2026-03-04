@@ -47,11 +47,10 @@ done
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 VAULT=$(vault_for_env "$ENV")
-LAB_VAULT="Lab"
 TARGET="ops@${HOST}"
-REPO_URL="git@github.com:corneo/n8n-server-setup.git"
+REPO_URL="git@github.com:corneo/home-lab.git"
 INSTALL_DIR="/opt/n8n"
-GITHUB_KEY_REF="op://${LAB_VAULT}/SSH Authentication Key for GitHub/private key?ssh-format=openssh"
+GITHUB_KEY_REF="op://${LAB_VAULT}/sshkey.github/private key?ssh-format=openssh"
 
 # ── Preflight ─────────────────────────────────────────────────────────────────
 
@@ -65,13 +64,14 @@ log "Provisioning host: $HOST (env: $ENV, vault: $VAULT)"
 # ── Phase 1: System update ────────────────────────────────────────────────────
 
 log "Phase 1: System update..."
-ssh "$TARGET" "sudo apt update && sudo apt full-upgrade -y"
+ssh "$TARGET" "sudo DEBIAN_FRONTEND=noninteractive apt update && sudo DEBIAN_FRONTEND=noninteractive apt full-upgrade -y"
 
 # ── Phase 2: Install Docker ───────────────────────────────────────────────────
 
 log "Phase 2: Installing Docker..."
 ssh "$TARGET" bash << 'ENDSSH'
 set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
 
 # Skip if Docker is already installed
 if command -v docker &>/dev/null; then
@@ -119,6 +119,7 @@ ssh "$TARGET" \
 log "Phase 4: Installing 1Password CLI..."
 ssh "$TARGET" bash << 'ENDSSH'
 set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
 
 # Skip if op is already installed
 if command -v op &>/dev/null; then
@@ -155,11 +156,19 @@ log "Phase 5: Installing GitHub SSH key..."
 op read "$GITHUB_KEY_REF" \
   | ssh "$TARGET" "install -m 600 /dev/stdin /home/ops/.ssh/id_ed25519"
 
-# Verify GitHub connectivity
+# Verify GitHub connectivity from the host
 log "Verifying GitHub SSH authentication..."
-op read "op://${LAB_VAULT}/SSH Authentication Key for GitHub/private key?ssh-format=openssh" \
+ssh "$TARGET" "ssh -T -o StrictHostKeyChecking=accept-new git@github.com 2>&1 | grep -q 'successfully authenticated'" \
   && log "GitHub auth OK." \
-  || log "Warning: GitHub auth check inconclusive — continuing."
+  || log "Warning: GitHub SSH auth check inconclusive — continuing."
+
+# ── Phase 5b: Place 1Password service account token on host ──────────────────
+
+log "Phase 5b: Installing 1Password service account token..."
+OP_TOKEN=$(op item get "op-service-account" --vault "$VAULT" --fields credential --reveal)
+echo "export OP_SERVICE_ACCOUNT_TOKEN=${OP_TOKEN}" \
+  | ssh "$TARGET" "install -m 600 /dev/stdin /home/ops/.op_env"
+log "OP service account token installed at /home/ops/.op_env (mode 600)."
 
 # ── Phase 6: Clone or update repo ────────────────────────────────────────────
 
@@ -194,3 +203,4 @@ log "IMPORTANT: User 'ops' must log out and back in or run 'newgrp docker' to"
 log "           activate docker group membership before deploying services."
 log " "
 log "Next step: ./provision-service.sh --env $ENV --host $HOST --service <name>"
+log "          or: ./provision.sh [spec.yaml]"

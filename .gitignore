@@ -1,5 +1,10 @@
 # --- Secrets & runtime state (NEVER commit) ---
 .env
+vault-*.txt
+vaults.lst
+
+# --- Generated artifacts (re-generate with: ./provision.sh --generate) ---
+servers.yaml
 
 # --- n8n / Postgres runtime data ---
 data/

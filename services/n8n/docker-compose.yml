@@ -1,6 +1,18 @@
+# .env must exist in this directory before running docker compose.
+# Generate it with: ./provision-service.sh (fetches secrets from 1Password).
+#
+# Required variables: N8N_ENCRYPTION_KEY, N8N_HOST, POSTGRES_DB, POSTGRES_USER,
+#   POSTGRES_PASSWORD, N8N_RUNNERS_AUTH_TOKEN
+#
+# The environment: blocks below handle two things env_file cannot:
+#   - Variable mapping  (e.g. POSTGRES_DB → DB_POSTGRESDB_DATABASE for n8n)
+#   - Default values    (e.g. TZ, N8N_PORT, N8N_PROTOCOL, etc.)
+# Pass-through entries (same name, no default) are omitted — env_file covers them.
+
 services:
 
   n8n:
+    env_file: .env
     image: "n8nio/n8n:${N8N_VERSION:-latest}"
     container_name: n8n
     restart: unless-stopped
@@ -12,7 +24,7 @@ services:
       # --- Basic ---
       TZ: ${TZ:-America/New_York}
 
-      # --- Database (Postgres) ---
+      # --- Database (Postgres) — mapped to n8n's expected variable names ---
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
       DB_POSTGRESDB_PORT: 5432
@@ -20,23 +32,17 @@ services:
       DB_POSTGRESDB_USER: ${POSTGRES_USER}
       DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
 
-      # --- Encryption key (set this!) ---
-      # Must be stable across restarts or stored creds can break.
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
-
-      # --- Recommended for reverse proxy setups (optional) ---
-      N8N_HOST: "${N8N_HOST}"
+      # --- Reverse proxy / URL config ---
       N8N_PORT: "${N8N_PORT:-5678}"
       N8N_PROTOCOL: "${N8N_PROTOCOL:-http}"
       WEBHOOK_URL: "${N8N_PROTOCOL:-http}://${N8N_HOST}:${N8N_PORT:-5678}"
 
       # Remove when HTTPS is enabled:
       N8N_SECURE_COOKIE: "${N8N_SECURE_COOKIE:-false}"
-      
-      # --- N8N external runners
+
+      # --- External runners ---
       N8N_RUNNERS_MODE: "${N8N_RUNNERS_MODE:-external}"
       N8N_RUNNERS_BROKER_LISTEN_ADDRESS: "${N8N_RUNNERS_BROKER_LISTEN_ADDRESS:-0.0.0.0}"
-      N8N_RUNNERS_AUTH_TOKEN: "${N8N_RUNNERS_AUTH_TOKEN}"
       N8N_NATIVE_PYTHON_RUNNER: "${N8N_NATIVE_PYTHON_RUNNER:-true}"
 
       # --- Hardening / UX knobs (optional) ---
@@ -51,14 +57,10 @@ services:
         condition: service_healthy
 
   postgres:
+    env_file: .env
     image: postgres:16-alpine
     container_name: n8n-postgres
     restart: unless-stopped
-
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
 
     # Exposing Postgres is OPTIONAL.
     # Purpose: allow TablePlus (or other SQL client) access from your LAN for convenience.
@@ -84,13 +86,13 @@ services:
       retries: 10
 
   n8n-runners:
+    env_file: .env
     image: "n8nio/runners:${N8N_VERSION:-latest}"
     container_name: n8n-runners
     restart: unless-stopped
 
     environment:
       N8N_RUNNERS_TASK_BROKER_URI: "http://n8n:5679"
-      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
-      
+
     depends_on:
       - n8n

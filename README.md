@@ -1,214 +1,173 @@
-# Local host/server n8n deployment
+# Homelab
 
-This repo contains the guidance and artifacts needed to deploy a self-hosted n8n stack using a docker composition.
-
-It is designed for a single-user homelab machine where the primary user (e.g. `tim`)
-has `sudo` access.
+Automation toolkit for provisioning Raspberry Pi hosts and deploying Docker-based services to them, driven from a macBook admin workstation. Secrets are stored in 1Password and fetched at deploy time — never committed to the repo.
 
 ---
 
-## What’s in this repo
+## How it works
 
-- `docker-compose.yml` — n8n + n8n runners + postgres services
-- `.env.example` — Example template for runtime environment variables. No secrets are in this file. Guidance for defining/obtaining these is given in comments in .env.example.
-- `setup.sh` — creates directories, sets ownership/permissions, creates `.env` if missing. Provides guidance just before completion for further setup actions. 
+```
+provision.sh <server>
+     │
+     ├─ provision-host.sh     OS updates, Docker, 1Password CLI, GitHub SSH key, repo clone
+     │
+     └─ provision-service.sh  Pull repo, generate .env from 1Password, docker compose up
+```
+
+Server configuration lives in 1Password (`server.*` items in the Lab vault) and is materialized into `servers.yaml` by `gen-spec.sh`. `provision.sh` reads that file and drives everything else.
 
 ---
 
-## Security model (high level)
+## What's in this repo
 
-- The real `.env` file is **never committed**.
-- Postgres data directory is owned by Postgres’ container UID/GID (999:999)
-  and permissions are **700**. This prevents accidental reads/writes by other users on the host.
-- n8n’s persistence directory (`/opt/n8n/data`) is owned by the local admin user and is readable/writable without `sudo` access.
-- For HTTP-only LAN access, `N8N_SECURE_COOKIE=false` i set. This will be removed when SSL and reverse-proxy are implemented.  (See ToDo's below.)
+```
+├── provision.sh             # Entry point: generate spec or provision a server
+├── gen-spec.sh              # Generate servers.yaml from 1Password server.* items
+├── provision-host.sh        # Prepare a bare host for Docker-based services
+├── provision-service.sh     # Deploy a specific service to a prepared host
+├── servers.example.yaml     # Documented example spec file
+├── common/
+│   ├── lib.sh               # Shared functions: log(), die(), vault_for_env()
+│   └── gen-env.sh           # Generate .env from 1Password fields
+└── services/
+    └── n8n/
+        ├── docker-compose.yml
+        └── .env.example
+```
+
+The `services/` directory is the service catalog. A service is supported if and only if `services/<name>/` exists in the repo. Adding a new service requires only adding that directory — no changes to provisioning scripts needed.
 
 ---
 
-## One-time install (fresh machine)
+## Prerequisites
 
-### 1) Create `/opt/n8n` and clone this repo into it
+**On the macBook:**
+- SSH access to target host as `ops` (key-based)
+- [1Password CLI (`op`)](https://developer.1password.com/docs/cli/) installed and authenticated
+- `yq` installed (`brew install yq`)
+- `jq` installed (`brew install jq`)
 
-Recommended safe approach:
+**On the target host (post-flash):**
+- Account `ops` with passwordless sudo
+- Internet access
+
+---
+
+## Usage
+
+### Generate the server spec (once, or after vault changes)
 
 ```bash
-sudo mkdir -p /opt/n8n
-sudo chown "$USER":"$USER" /opt/n8n
-
-cd /opt/n8n
-git clone git@github.com:corneo/n8n-server-setup.git .
+./provision.sh --generate
 ```
 
-> Note: Cloning into `.` keeps the directory name fixed as `/opt/n8n`, regardless of the repo name.
+Queries all `server.*` items in the Lab vault and writes `servers.yaml`. Re-run any time you add or change a server in 1Password.
 
-### 2) Run setup
+### Provision a server
 
 ```bash
-cd /opt/n8n
-sudo ./setup.sh
+./provision.sh <server>
 ```
 
-This will:
-
-- create folders data, postgres, and backups
-- apply ownership + permissions
-- create `.env` from `.env.example` if it doesn’t exist
-- verify required variables exist in `.env` (but not their values)
-
-### 3) Create/edit `.env`
-
-Copy/paste secrets from 1Password into:
-
-- `N8N_ENCRYPTION_KEY` (must never change)
-- `POSTGRES_PASSWORD`
-
-Optional but commonly needed for HTTP-only LAN setups:
-
-- `N8N_SECURE_COOKIE=false`
+Looks up the server in `servers.yaml` (auto-generates it if missing), provisions the host, then deploys its services.
 
 ```bash
-nano /opt/n8n/.env
-chmod 600 /opt/n8n/.env
+./provision.sh rpicm5b                        # full: host + all services
+./provision.sh rpicm5b --host-only            # host provisioning only
+./provision.sh rpicm5b --services-only        # service deployments only
+./provision.sh rpicm5b dev                    # override env (default: from servers.yaml)
+./provision.sh rpicm5b --spec myservers.yaml  # use a named spec file
 ```
 
-### 4) Start the stack
+Both steps are safe to re-run on an already-provisioned host/service.
+
+### Provision directly (bypassing the spec)
 
 ```bash
-cd /opt/n8n
+./provision-host.sh --env dev --host rpicm5b
+./provision-service.sh --env dev --host rpicm5b --service n8n
+```
+
+---
+
+## 1Password conventions
+
+### Vaults
+
+| Vault | Purpose |
+|-------|---------|
+| `Lab` | Shared items: GitHub SSH key, `server.*` host specs |
+| `devLab` | Dev-environment secrets: `op-service-account`, `service.*` items |
+| `prodLab` | Prod-environment secrets |
+
+### `server.*` items (Lab vault)
+
+One item per host, named `server.<name>`. Fields:
+
+| Field | Required | Purpose |
+|-------|----------|---------|
+| `env` | yes | `dev` or `prod` — selects vault for service secrets |
+| `hostname` | no | SSH target; defaults to server name |
+| `app.<name>` | yes (≥1) | One **section** per service to deploy (e.g. section `app.n8n`). Fields within the section prefixed `env.*` are host-specific env overrides (future). |
+
+### `service.*` items (devLab / prodLab vaults)
+
+One item per service per environment, named `service.<name>`. Fields prefixed with `env.` become environment variables in the generated `.env`:
+
+```
+env.POSTGRES_PASSWORD   →  POSTGRES_PASSWORD=<value>
+env.N8N_ENCRYPTION_KEY  →  N8N_ENCRYPTION_KEY=<value>
+```
+
+Fields without the `env.` prefix are ignored.
+
+---
+
+## Services
+
+### n8n
+
+Workflow automation with Postgres backend and external task runner.
+
+**Stack** (`services/n8n/docker-compose.yml`):
+- `n8nio/n8n` — exposed on port 5678
+- `postgres:16-alpine` — data at `/opt/n8n/postgres` (UID/GID 70:70, mode 700)
+- `n8nio/runners` — external task runner (connects to n8n broker on port 5679)
+
+**Required 1Password fields** (in `service.n8n`):
+- `env.N8N_ENCRYPTION_KEY` — must never change once set; changing it breaks all stored credentials
+- `env.POSTGRES_DB`
+- `env.POSTGRES_USER`
+- `env.POSTGRES_PASSWORD`
+- `env.N8N_RUNNERS_AUTH_TOKEN` — generate with `openssl rand -base64 24`
+
+**Stack lifecycle** (on the host at `/opt/n8n/services/n8n`):
+
+```bash
 docker compose up -d
+docker compose down
 docker compose ps
+docker compose logs -f n8n
+docker compose logs -f postgres
 ```
 
-Open:
-
-- `http://<host>:5678` or `http://n8n.iot:5678` (depending on your DNS)
-
----
-
-## Daily operations
-
-From `/opt/n8n`:
-
-- Start: `docker compose up -d`
-- Stop: `docker compose down`
-- Logs: `docker compose logs -f n8n` and `docker compose logs -f postgres`
-- Status: `docker compose ps`
-
----
-
-## Backups (recommended approach)
-
-Logical database backup using `pg_dump` (safe + consistent):
-
+**Database backup:**
 ```bash
-mkdir -p /opt/n8n/backups
-chmod 700 /opt/n8n/backups
-
 docker exec -t n8n-postgres pg_dump -U n8n -d n8n | gzip > /opt/n8n/backups/n8n-$(date +%F).sql.gz
-ls -lh /opt/n8n/backups
 ```
 
-Restore example (careful: overwrites data):
-
+**Database restore:**
 ```bash
 gunzip -c /opt/n8n/backups/n8n-YYYY-MM-DD.sql.gz | docker exec -i n8n-postgres psql -U n8n -d n8n
 ```
 
----
-
-## Optional: Postgres access from TablePlus (LAN)
-
-By default this stack can expose Postgres on the host for convenience (TablePlus, etc.).
-This is controlled by:
-
-- `POSTGRES_BIND_IP` (in `.env`)
-
-Examples:
-
-- **Safer default (host-only):**
-  - `POSTGRES_BIND_IP=127.0.0.1`
-  - Use SSH tunneling when needed:
-    ```bash
-    ssh -L 5432:127.0.0.1:5432 tim@n8n
-    ```
-  - Then connect TablePlus to `localhost:5432`
-
-- **LAN convenience mode:**
-  - `POSTGRES_BIND_IP=<host VLAN interface IP>` (e.g. `10.20.0.6`)
-  - Strongly recommended: restrict access with UniFi firewall rules so only your admin laptop can reach TCP/5432.
-
-## Notes
-
-- This repo intentionally does not attempt to integrate 1Password CLI (`op`) on the server.
-  Secrets are copy/pasted manually from 1Password into `.env`.
-- When moving to HTTPS (Traefik/Caddy), you will update `.env` (host/protocol/webhook URL) and remove
-  `N8N_SECURE_COOKIE=false`.
+**HTTPS transition:** Update `N8N_HOST`, `N8N_PROTOCOL`, `WEBHOOK_URL` in `.env` and remove `N8N_SECURE_COOKIE=false`.
 
 ---
 
-## ToDo:
+## Security model
 
-- add scripts for backup and restore:
-  - `scripts/backup.sh`, 
-  - `scripts/restore.sh`
-- Schedule backups
-  - Define strategy
-    - When
-    - Days, weeks, months, years
-    - Where to store. (DropBox?)
-
-- Implement strategy
-  
-  - 
-  - add to cron
-
-## TODO: Restrict Postgres LAN Access with UniFi Firewall Rules
-
-Postgres is optionally exposed on the host to allow convenient access from tools
-like TablePlus during n8n workflow development. This increases the blast radius
-unless access is explicitly restricted.
-
-**Planned mitigation (recommended):**
-
-### Preconditions
-
-- Assign a **static / reserved IP** to your admin laptop (DHCP reservation).
-- Ensure the n8n host has a **stable IP** on its VLAN (e.g. VLAN 20).
-
-### Firewall policy (conceptual)
-
-Create rules on the UniFi gateway in the **LAN IN** (or equivalent) rule set,
-ordered as shown:
-
-1. **Allow admin laptop → Postgres**
-   - Action: **Accept**
-   - Protocol: **TCP**
-   - Source: **Admin laptop IP**
-   - Destination: **n8n host IP** (e.g. `10.20.0.6`)
-   - Destination port: **5432**
-   - Comment: `Allow TablePlus access to n8n Postgres`
-
-2. **Block all other Postgres access**
-   - Action: **Drop** (or Reject if you prefer explicit feedback)
-   - Protocol: **TCP**
-   - Source: **Any**
-   - Destination: **n8n host IP**
-   - Destination port: **5432**
-   - Comment: `Block Postgres access to n8n host`
-
-This preserves TablePlus convenience while preventing lateral access from other
-hosts or VLANs.
-
-### Alternative (safer) mode
-
-Instead of exposing Postgres on the LAN:
-
-- Set `POSTGRES_BIND_IP=127.0.0.1`
-- Use SSH port forwarding when needed:
-
-  ```bash
-  ssh -L 5432:127.0.0.1:5432 tim@n8n
-  ```
-
-- Connect TablePlus to `localhost:5432`
-
+- `.env` files are never committed. Secrets are fetched from 1Password at deploy time and written on the host.
+- The OP service account token is placed on each host at `/home/ops/.op_env` (mode 600) during host provisioning. Service deployments source it from there — the token never passes through the admin workstation at deploy time.
+- Generated `.env` files are written with `640` permissions.
+- Postgres data directory is owned by UID/GID 70:70 with mode 700.

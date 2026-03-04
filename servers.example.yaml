@@ -1,0 +1,38 @@
+# servers.example.yaml — Example provisioning spec for provision.sh
+#
+# Declares which hosts to provision and which services to deploy.
+# Source of truth is 1Password (server.* items in the Lab vault).
+#
+# In 1Password Lab vault, create one "server.{name}" item per host with:
+#   env      — field; "dev" or "prod" (required)
+#   hostname — field; SSH target hostname (optional; defaults to server name)
+#   app.n8n  — section; one per service to deploy. Fields within the section
+#              prefixed "env.*" are host-specific overrides (future capability).
+#
+# Generate this file from 1Password:
+#   ./provision.sh --generate
+#
+# Provision a server (full: host + services):
+#   ./provision.sh rpicm5b
+#
+# Regenerate spec then provision:
+#   ./provision.sh --generate && ./provision.sh rpicm5b
+#
+# Host provisioning only:
+#   ./provision.sh rpicm5b --host-only
+#
+# Service deployments only:
+#   ./provision.sh rpicm5b --services-only
+
+hosts:
+  - server: rpicm5b          # matches "server.rpicm5b" item in Lab vault
+    env: dev                 # determines which vault to use (devLab or prodLab)
+    hostname: rpicm5b.iot    # optional: SSH target; defaults to server name
+    services:
+      - n8n                  # derived from "app.n8n" section on the OP item
+
+  - server: rpicm5c
+    env: dev
+    # hostname omitted: SSH target will be "rpicm5c"
+    services:
+      - n8n
